@@ -27,36 +27,120 @@ const (
 
 var modifierRegister = register.New()
 
-// ModifierFactory is a function that, given a config passed as a map, returns a modifier
-type ModifierFactory func(map[string]interface{}) func(interface{}) (interface{}, error)
+// Modifier is a generic function that transforms a value of type T
+type Modifier[T any] func(T) (T, error)
+
+// ModifierFactory is a generic function that, given a config passed as a map, returns a Modifier
+type ModifierFactory[T any] func(map[string]interface{}) Modifier[T]
+
+// legacyModifierFactory is the modifier factory signature used by plugins compiled
+// against the pre-generics API. It is kept as the storage format of the shared
+// register so those plugins keep working unchanged.
+type legacyModifierFactory = func(map[string]interface{}) func(interface{}) (interface{}, error)
+
+// Register is a generic, type-safe view over a namespace of the shared modifier
+// register. Factories registered through the legacy RegisterModifier entrypoint
+// are visible to generic lookups and vice versa.
+type Register[T any] struct {
+	data *register.Untyped
+}
+
+// NewRegister returns the generic Register bound to the given namespace of the
+// shared modifier register
+func NewRegister[T any](namespace string) *Register[T] {
+	modifierRegister.AddNamespace(namespace)
+	r, _ := modifierRegister.Get(namespace)
+	return &Register[T]{data: r}
+}
+
+// Register stores the given ModifierFactory under the given name
+func (r *Register[T]) Register(name string, f ModifierFactory[T]) {
+	r.data.Register(name, toLegacyFactory(f))
+}
+
+// Get returns the ModifierFactory stored under the given name
+func (r *Register[T]) Get(name string) (ModifierFactory[T], bool) {
+	v, ok := r.data.Get(name)
+	if !ok {
+		return nil, ok
+	}
+	legacy, ok := v.(legacyModifierFactory)
+	if !ok {
+		return nil, ok
+	}
+	return fromLegacyFactory[T](legacy), true
+}
 
 // GetRequestModifier returns a ModifierFactory from the request namespace by name
-func GetRequestModifier(name string) (ModifierFactory, bool) {
-	return getModifier(requestNamespace, name)
+func GetRequestModifier[T any](name string) (ModifierFactory[T], bool) {
+	return NewRegister[T](requestNamespace).Get(name)
 }
 
 // GetResponseModifier returns a ModifierFactory from the response namespace by name
-func GetResponseModifier(name string) (ModifierFactory, bool) {
-	return getModifier(responseNamespace, name)
+func GetResponseModifier[T any](name string) (ModifierFactory[T], bool) {
+	return NewRegister[T](responseNamespace).Get(name)
 }
 
-func getModifier(namespace, name string) (ModifierFactory, bool) {
-	r, ok := modifierRegister.Get(namespace)
-	if !ok {
-		return nil, ok
+// RegisterModifierFactory registers a generic ModifierFactory with the given name
+// at the selected namespaces. It is the type-safe counterpart of RegisterModifier.
+func RegisterModifierFactory[T any](
+	name string,
+	modifierFactory ModifierFactory[T],
+	appliesToRequest bool,
+	appliesToResponse bool,
+) {
+	if appliesToRequest {
+		NewRegister[T](requestNamespace).Register(name, modifierFactory)
 	}
-	m, ok := r.Get(name)
-	if !ok {
-		return nil, ok
+	if appliesToResponse {
+		NewRegister[T](responseNamespace).Register(name, modifierFactory)
 	}
-	res, ok := m.(func(map[string]interface{}) func(interface{}) (interface{}, error))
-	if !ok {
-		return nil, ok
-	}
-	return ModifierFactory(res), ok
 }
 
-// RegisterModifier registers the injected modifier factory with the given name at the selected namespace
+// fromLegacyFactory adapts a legacy modifier factory into a generic one. Modifiers
+// returning values that do not satisfy T are discarded, keeping the previous value,
+// as the old execute*Modifiers loops did.
+func fromLegacyFactory[T any](f legacyModifierFactory) ModifierFactory[T] {
+	return func(cfg map[string]interface{}) Modifier[T] {
+		m := f(cfg)
+		if m == nil {
+			return nil
+		}
+		return func(v T) (T, error) {
+			res, err := m(v)
+			if err != nil {
+				return v, err
+			}
+			t, ok := res.(T)
+			if !ok {
+				return v, nil
+			}
+			return t, nil
+		}
+	}
+}
+
+// toLegacyFactory adapts a generic ModifierFactory into the legacy signature so it
+// can be stored in the shared register and consumed by legacy clients. Values that
+// do not satisfy T are passed through unchanged.
+func toLegacyFactory[T any](f ModifierFactory[T]) legacyModifierFactory {
+	return func(cfg map[string]interface{}) func(interface{}) (interface{}, error) {
+		m := f(cfg)
+		if m == nil {
+			return nil
+		}
+		return func(v interface{}) (interface{}, error) {
+			t, ok := v.(T)
+			if !ok {
+				return v, nil
+			}
+			return m(t)
+		}
+	}
+}
+
+// RegisterModifier registers the injected modifier factory with the given name at the selected namespace.
+// It keeps the pre-generics signature so plugins compiled against the legacy API keep working.
 func RegisterModifier(
 	name string,
 	modifierFactory func(map[string]interface{}) func(interface{}) (interface{}, error),
