@@ -36,7 +36,7 @@ func ExampleLoadWithLoggerAndContext() {
 		return
 	}
 
-	modFactory, ok := GetRequestModifier("lura-request-modifier-example-request")
+	modFactory, ok := GetRequestModifier[RequestWrapper]("lura-request-modifier-example-request")
 	if !ok {
 		fmt.Println("modifier factory not found in the register")
 		return
@@ -51,15 +51,9 @@ func ExampleLoadWithLoggerAndContext() {
 		headers: map[string][]string{"X-Foo": {"bar"}},
 	}
 
-	tmp, err := modifier(input)
+	output, err := modifier(input)
 	if err != nil {
 		fmt.Println(err.Error())
-		return
-	}
-
-	output, ok := tmp.(RequestWrapper)
-	if !ok {
-		fmt.Println("unexpected result type")
 		return
 	}
 
@@ -68,13 +62,13 @@ func ExampleLoadWithLoggerAndContext() {
 		return
 	}
 
-	modFactory, ok = GetResponseModifier("lura-request-modifier-example-response")
+	respModFactory, ok := GetResponseModifier[ResponseWrapper]("lura-request-modifier-example-response")
 	if !ok {
 		fmt.Println("modifier factory not found in the register")
 		return
 	}
 
-	modifier = modFactory(map[string]interface{}{})
+	respModifier := respModFactory(map[string]interface{}{})
 
 	response := responseWrapper{
 		ctx:     context.WithValue(context.Background(), "myCtxKey", "other"),
@@ -82,7 +76,7 @@ func ExampleLoadWithLoggerAndContext() {
 		data:    map[string]interface{}{"foo": "bar"},
 	}
 
-	if _, err = modifier(response); err != nil {
+	if _, err = respModifier(response); err != nil {
 		fmt.Println(err.Error())
 		return
 	}
@@ -125,7 +119,7 @@ func TestLoad(t *testing.T) {
 		t.Errorf("unexpected number of loaded plugins!. have %d, want 2", total)
 	}
 
-	modFactory, ok := GetRequestModifier("lura-request-modifier-example-request")
+	modFactory, ok := GetRequestModifier[RequestWrapper]("lura-request-modifier-example-request")
 	if !ok {
 		t.Error("modifier factory not found in the register")
 		return
@@ -135,15 +129,9 @@ func TestLoad(t *testing.T) {
 
 	input := requestWrapper{ctx: context.WithValue(context.Background(), "myCtxKey", "some"), path: "/bar"}
 
-	tmp, err := modifier(input)
+	output, err := modifier(input)
 	if err != nil {
 		t.Error(err.Error())
-		return
-	}
-
-	output, ok := tmp.(RequestWrapper)
-	if !ok {
-		t.Error("unexpected result type")
 		return
 	}
 
@@ -160,6 +148,16 @@ type RequestWrapper interface {
 	URL() *url.URL
 	Query() url.Values
 	Path() string
+}
+
+type ResponseWrapper interface {
+	Context() context.Context
+	Request() interface{}
+	Data() map[string]interface{}
+	IsComplete() bool
+	Io() io.Reader
+	Headers() map[string][]string
+	StatusCode() int
 }
 
 type requestWrapper struct {

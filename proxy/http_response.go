@@ -71,3 +71,46 @@ func NoOpHTTPResponseParser(ctx context.Context, resp *http.Response) (*Response
 		},
 	}, nil
 }
+
+// newResponseWrapper wraps the received response into a ResponseWrapper, so it
+// can be passed to the plugin modifiers along with the originating request
+func newResponseWrapper(ctx context.Context, req *Request, r *Response) responseWrapper {
+	return responseWrapper{
+		ctx:        ctx,
+		request:    newRequestWrapper(ctx, req),
+		data:       r.Data,
+		isComplete: r.IsComplete,
+		metadata: metadataWrapper{
+			headers:    r.Metadata.Headers,
+			statusCode: r.Metadata.StatusCode,
+		},
+		io: r.Io,
+	}
+}
+
+// metadataWrapper is the ResponseWrapper metadata
+type metadataWrapper struct {
+	headers    map[string][]string
+	statusCode int
+}
+
+func (m metadataWrapper) Headers() map[string][]string { return m.headers }
+func (m metadataWrapper) StatusCode() int              { return m.statusCode }
+
+// responseWrapper is the ResponseWrapper implementation for the Response type
+type responseWrapper struct {
+	ctx        context.Context
+	request    interface{}
+	data       map[string]interface{}
+	isComplete bool
+	metadata   metadataWrapper
+	io         io.Reader
+}
+
+func (r responseWrapper) Context() context.Context     { return r.ctx }
+func (r responseWrapper) Request() interface{}         { return r.request }
+func (r responseWrapper) Data() map[string]interface{} { return r.data }
+func (r responseWrapper) IsComplete() bool             { return r.isComplete }
+func (r responseWrapper) Io() io.Reader                { return r.io }
+func (r responseWrapper) Headers() map[string][]string { return r.metadata.headers }
+func (r responseWrapper) StatusCode() int              { return r.metadata.statusCode }

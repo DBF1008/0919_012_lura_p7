@@ -27,20 +27,26 @@ const (
 
 var modifierRegister = register.New()
 
-// ModifierFactory is a function that, given a config passed as a map, returns a modifier
-type ModifierFactory func(map[string]interface{}) func(interface{}) (interface{}, error)
+// ModifierFactory is a generic function that, given a config passed as a map,
+// returns a modifier over values of type T
+type ModifierFactory[T any] func(map[string]interface{}) func(T) (T, error)
+
+// LegacyModifierFactory is the pre-generics modifier factory signature. It is
+// kept so modifier plugins compiled before the generic register was introduced
+// remain compatible
+type LegacyModifierFactory = func(map[string]interface{}) func(interface{}) (interface{}, error)
 
 // GetRequestModifier returns a ModifierFactory from the request namespace by name
-func GetRequestModifier(name string) (ModifierFactory, bool) {
-	return getModifier(requestNamespace, name)
+func GetRequestModifier[T any](name string) (ModifierFactory[T], bool) {
+	return getModifier[T](requestNamespace, name)
 }
 
 // GetResponseModifier returns a ModifierFactory from the response namespace by name
-func GetResponseModifier(name string) (ModifierFactory, bool) {
-	return getModifier(responseNamespace, name)
+func GetResponseModifier[T any](name string) (ModifierFactory[T], bool) {
+	return getModifier[T](responseNamespace, name)
 }
 
-func getModifier(namespace, name string) (ModifierFactory, bool) {
+func getModifier[T any](namespace, name string) (ModifierFactory[T], bool) {
 	r, ok := modifierRegister.Get(namespace)
 	if !ok {
 		return nil, ok
@@ -49,17 +55,61 @@ func getModifier(namespace, name string) (ModifierFactory, bool) {
 	if !ok {
 		return nil, ok
 	}
-	res, ok := m.(func(map[string]interface{}) func(interface{}) (interface{}, error))
-	if !ok {
-		return nil, ok
+	switch res := m.(type) {
+	case ModifierFactory[T]:
+		return res, true
+	case func(map[string]interface{}) func(T) (T, error):
+		return ModifierFactory[T](res), true
+	case LegacyModifierFactory:
+		return adaptLegacyFactory[T](res), true
 	}
-	return ModifierFactory(res), ok
+	return nil, false
 }
 
-// RegisterModifier registers the injected modifier factory with the given name at the selected namespace
+// adaptLegacyFactory wraps a legacy interface{}-based modifier factory into a
+// generic one, preserving the original semantics: results that do not satisfy
+// the target type are discarded and the previous value is kept
+func adaptLegacyFactory[T any](factory LegacyModifierFactory) ModifierFactory[T] {
+	return func(cfg map[string]interface{}) func(T) (T, error) {
+		modifier := factory(cfg)
+		if modifier == nil {
+			return nil
+		}
+		return func(v T) (T, error) {
+			res, err := modifier(v)
+			if err != nil {
+				return v, err
+			}
+			typed, ok := res.(T)
+			if !ok {
+				return v, nil
+			}
+			return typed, nil
+		}
+	}
+}
+
+// RegisterTypedModifier registers a generic modifier factory with the given name
+// at the selected namespaces
+func RegisterTypedModifier[T any](
+	name string,
+	modifierFactory ModifierFactory[T],
+	appliesToRequest bool,
+	appliesToResponse bool,
+) {
+	if appliesToRequest {
+		modifierRegister.Register(requestNamespace, name, modifierFactory)
+	}
+	if appliesToResponse {
+		modifierRegister.Register(responseNamespace, name, modifierFactory)
+	}
+}
+
+// RegisterModifier registers the injected modifier factory with the given name at the selected namespace.
+// It keeps the legacy interface{}-based signature for backward compatibility with already compiled plugins
 func RegisterModifier(
 	name string,
-	modifierFactory func(map[string]interface{}) func(interface{}) (interface{}, error),
+	modifierFactory LegacyModifierFactory,
 	appliesToRequest bool,
 	appliesToResponse bool,
 ) {
@@ -75,7 +125,7 @@ func RegisterModifier(
 type Registerer interface {
 	RegisterModifiers(func(
 		name string,
-		modifierFactory func(map[string]interface{}) func(interface{}) (interface{}, error),
+		modifierFactory LegacyModifierFactory,
 		appliesToRequest bool,
 		appliesToResponse bool,
 	))
@@ -92,7 +142,7 @@ type ContextRegisterer interface {
 // RegisterModifierFunc type is the function passed to the loaded Registerers
 type RegisterModifierFunc func(
 	name string,
-	modifierFactory func(map[string]interface{}) func(interface{}) (interface{}, error),
+	modifierFactory LegacyModifierFactory,
 	appliesToRequest bool,
 	appliesToResponse bool,
 )
